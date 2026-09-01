@@ -4,9 +4,8 @@ Conventional Adaptive Bitrate (ABR) algorithms continuously adapt the video repr
 
 The Streaming Assistant addresses this gap by predicting potential future QoE degradation and recommending appropriate interventions before a severe playback interruption occurs.
 
-The core principle is:
+The core principle is: **A small, temporary QoE sacrifice can prevent a much larger future QoE degradation.**
 
-A small, temporary QoE sacrifice can prevent a much larger future QoE degradation.
 
 **Motivation**
 
@@ -23,6 +22,7 @@ These variations can cause the playback buffer to gradually deplete even when th
 An ABR algorithm may respond by switching to a lower representation. However, if the available throughput continues to remain insufficient, the buffer can eventually become empty, resulting in rebuffering/stalling.
 
 The Streaming Assistant therefore focuses on the future state of playback, rather than only the current streaming state.
+
 
 **Research Objective**
 

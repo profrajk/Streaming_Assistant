@@ -8,7 +8,7 @@ The core principle is:
 
 A small, temporary QoE sacrifice can prevent a much larger future QoE degradation.
 
-Motivation
+**Motivation**
 
 Modern mobile and wireless networks can exhibit significant variations in:
 
@@ -24,7 +24,7 @@ An ABR algorithm may respond by switching to a lower representation. However, if
 
 The Streaming Assistant therefore focuses on the future state of playback, rather than only the current streaming state.
 
-Research Objective
+**Research Objective**
 
 The primary objective of this project is to develop an intelligent assistant capable of:
 

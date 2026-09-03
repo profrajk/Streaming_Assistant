@@ -162,7 +162,70 @@ def plot_confusion_matrix(y_true, y_pred_cls, save_path):
     plt.title('Stage 2: Pause Decision Confusion Matrix')
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
-    plt.close()
+def evaluate_segments(model, device):
+    """
+    Reads segments_ranges.txt to find the number of segments,
+    then evaluates Stage 1 (forecasting) and Stage 2 (pause decisions)
+    separately on each segment file from SEGMENTS_DIR.
+    """
+    txt_path = config.SEGMENTS_TXT_PATH
+    if not os.path.exists(txt_path):
+        return
+
+    num_segments = None
+    with open(txt_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if "number of segments:" in line.lower():
+                parts = line.split(":")
+                if len(parts) > 1:
+                    try:
+                        num_segments = int(parts[1].strip())
+                        break
+                    except ValueError:
+                        pass
+    if num_segments is None:
+        num_segments = config.DEFAULT_NUM_SEGMENTS
+
+    print("\n" + "=" * 80)
+    print(f"PER-SEGMENT EVALUATION (Found {num_segments} segments in segments_ranges.txt)")
+    print("=" * 80)
+
+    import data_parser
+    for i in range(1, num_segments + 1):
+        seg_name = f"Segment_{i}"
+        csv_path = os.path.join(config.SEGMENTS_DIR, f"{seg_name}.csv")
+        if not os.path.exists(csv_path):
+            continue
+
+        seg_df = pd.read_csv(csv_path, index_col=0)
+        if "should_pause" not in seg_df.columns:
+            seg_df = data_parser.generate_labels(seg_df)
+
+        try:
+            X_seg, Y_fut_seg, y_cls_seg, y_reg_seg = data_parser.create_sequences(seg_df)
+        except Exception as e:
+            print(f"  {seg_name}: Not enough samples for sequence evaluation ({len(seg_df)} rows).")
+            continue
+
+        with torch.no_grad():
+            X_t = torch.tensor(X_seg, dtype=torch.float32).to(device)
+            fut_p, prob, dur = model(X_t)
+            fut_p = fut_p.cpu().numpy()
+            prob = prob.cpu().numpy().flatten()
+
+        y_pred = (prob > config.PAUSE_DECISION_THRESHOLD).astype(int)
+
+        maes = []
+        for feat_idx in range(config.NUM_FORECAST_FEATURES):
+            mae_f = mean_absolute_error(Y_fut_seg[:, :, feat_idx].flatten(), fut_p[:, :, feat_idx].flatten())
+            maes.append(mae_f)
+        avg_mae = np.mean(maes)
+
+        acc = accuracy_score(y_cls_seg, y_pred)
+        f1 = f1_score(y_cls_seg, y_pred, zero_division=0)
+        pos_count = int(y_cls_seg.sum())
+
+        print(f"  {seg_name:<12} | Sequences: {len(X_seg):>4} | Positives: {pos_count:>3} | Forecast Avg MAE: {avg_mae:>7.4f} | Accuracy: {acc:>6.2%} | F1: {f1:>6.2%}")
 
 
 def main():
@@ -254,7 +317,12 @@ def main():
         print(f"RMSE : {rmse:.4f}")
     else:
         print("\nNo positive labels in validation set for regression evaluation.")
-        
+
+    # ----------------------------------------------------
+    # Stage 3: Per-Segment Evaluation (Reads segments_ranges.txt)
+    # ----------------------------------------------------
+    evaluate_segments(model, device)
+
     print("\nGenerating visualizations...")
     os.makedirs(config.RESULTS_DIR, exist_ok=True)
     

@@ -50,91 +50,51 @@ PAUSE_BUFFER_THRESHOLD = config.MIN_BUFFER_TO_PAUSE_S  # only consider pausing i
 MIN_BUFFER_TO_RESUME = 5.0  # resume play after stall when buffer reaches this
 
 # ============================================================
-# Network Condition Scenarios  (Change iii)
+# Segment Scenarios — Loaded from Segments Directory
 # ============================================================
-def create_network_scenarios(base_throughput, base_features_df):
+def load_segment_scenarios():
     """
-    Create multiple network condition scenarios from the real trace.
-
-    Change (iii): Each scenario degrades throughput AND RF signal quality
-    (RSRP, RSRQ, RSSNR) together, reflecting the correlated degradation that
-    occurs in real environments (building entry, cell-edge, handover, etc.).
-
-    Returns dict of {scenario_name: (throughput_array, features_df)}.
+    Reads segments_ranges.txt in the Segments directory to determine the number
+    of segments, then loads each segment file as an independent scenario.
+    Each segment is treated as a distinct real-world scenario for QoE evaluation.
     """
-    n = len(base_throughput)
-    np.random.seed(config.RANDOM_SEED)
+    txt_path = config.SEGMENTS_TXT_PATH
+    if not os.path.exists(txt_path):
+        print(f"[QoE] Segments text file not found at {txt_path}. Running data parser...", flush=True)
+        import data_parser
+        data_parser.main()
 
-    # Reference RF baselines (used for clipping to realistic ranges)
-    base_rsrp  = base_features_df["rsrp"].values.copy()   # dBm  (typ: -80 to -120)
-    base_rsrq  = base_features_df["rsrq"].values.copy()   # dB   (typ: -5  to -20)
-    base_rssnr = base_features_df["rssnr"].values.copy()  # dB   (typ: -10 to +30)
+    print(f"\n[QoE] Reading segment information from: {txt_path}", flush=True)
+    num_segments = None
+    with open(txt_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if "number of segments:" in line.lower():
+                parts = line.split(":")
+                if len(parts) > 1:
+                    try:
+                        num_segments = int(parts[1].strip())
+                        break
+                    except ValueError:
+                        pass
+
+    if num_segments is None:
+        seg_files = [f for f in os.listdir(config.SEGMENTS_DIR) if f.startswith("Segment_") and f.endswith(".csv")]
+        num_segments = len(seg_files) if seg_files else config.DEFAULT_NUM_SEGMENTS
+
+    print(f"  Detected {num_segments} segments from text file.", flush=True)
 
     scenarios = {}
+    for i in range(1, num_segments + 1):
+        seg_name = f"Segment_{i}"
+        csv_path = os.path.join(config.SEGMENTS_DIR, f"{seg_name}.csv")
+        if not os.path.exists(csv_path):
+            print(f"  [Warning] {csv_path} not found, skipping.", flush=True)
+            continue
 
-    # ── 1. Good 5G — original trace, no changes ───────────────────────────────
-    scenarios["Good 5G (Original)"] = (base_throughput.copy(), base_features_df.copy())
-
-    # ── 2. Moderate 5G — 50% throughput, mild signal degradation ─────────────
-    tp_mod = base_throughput * 0.5
-    df_mod = base_features_df.copy()
-    df_mod["downlink_mbps"] = tp_mod
-    df_mod["rsrp"]          = np.clip(base_rsrp  -  5.0, -120, -70)
-    df_mod["rsrq"]          = np.clip(base_rsrq  -  2.0,  -20,  -3)
-    df_mod["rssnr"]         = np.clip(base_rssnr -  5.0,  -15,  30)
-    scenarios["Moderate 5G (50% throughput)"] = (tp_mod, df_mod)
-
-    # ── 3. Poor 4G/5G transition — 20% throughput, significant signal drop ────
-    tp_poor = base_throughput * 0.2
-    df_poor = base_features_df.copy()
-    df_poor["downlink_mbps"] = tp_poor
-    df_poor["rsrp"]          = np.clip(base_rsrp  - 15.0, -125, -70)
-    df_poor["rsrq"]          = np.clip(base_rsrq  -  5.0,  -20,  -3)
-    df_poor["rssnr"]         = np.clip(base_rssnr - 12.0,  -15,  30)
-    scenarios["Poor (20% throughput)"] = (tp_poor, df_poor)
-
-    # ── 4. Cell-edge — 10% throughput, severe signal degradation ─────────────
-    tp_vpoor = base_throughput * 0.1
-    df_vpoor = base_features_df.copy()
-    df_vpoor["downlink_mbps"] = tp_vpoor
-    df_vpoor["rsrp"]          = np.clip(base_rsrp  - 25.0, -130, -70)
-    df_vpoor["rsrq"]          = np.clip(base_rsrq  -  8.0,  -20,  -3)
-    df_vpoor["rssnr"]         = np.clip(base_rssnr - 18.0,  -15,  30)
-    scenarios["Cell-edge (10% throughput)"] = (tp_vpoor, df_vpoor)
-
-    # ── 5. Intermittent (building/tunnel) — random 30% second-drops ──────────
-    tp_inter = base_throughput.copy()
-    drop_mask = np.random.random(n) < 0.30
-    tp_inter[drop_mask] = 0.0
-    df_inter = base_features_df.copy()
-    df_inter["downlink_mbps"] = tp_inter
-    # Signal also dips during drop seconds
-    df_inter["rsrp"]  = base_rsrp.copy()
-    df_inter["rsrq"]  = base_rsrq.copy()
-    df_inter["rssnr"] = base_rssnr.copy()
-    df_inter.loc[drop_mask, "rsrp"]  = np.clip(base_rsrp[drop_mask]  - 20.0, -130, -70)
-    df_inter.loc[drop_mask, "rsrq"]  = np.clip(base_rsrq[drop_mask]  -  6.0,  -20,  -3)
-    df_inter.loc[drop_mask, "rssnr"] = np.clip(base_rssnr[drop_mask] - 15.0,  -15,  30)
-    scenarios["Intermittent (30% drops)"] = (tp_inter, df_inter)
-
-    # ── 6. Bursty (elevator/moving) — 20s good / 15s near-zero ──────────────
-    tp_bursty = base_throughput.copy()
-    rsrp_bursty  = base_rsrp.copy()
-    rsrq_bursty  = base_rsrq.copy()
-    rssnr_bursty = base_rssnr.copy()
-    for i in range(n):
-        cycle_pos = i % 35              # 35-second cycle
-        if cycle_pos >= 20:             # last 15 seconds are bad
-            tp_bursty[i]   *= 0.05
-            rsrp_bursty[i]  = np.clip(base_rsrp[i]  - 22.0, -130, -70)
-            rsrq_bursty[i]  = np.clip(base_rsrq[i]  -  7.0,  -20,  -3)
-            rssnr_bursty[i] = np.clip(base_rssnr[i] - 16.0,  -15,  30)
-    df_bursty = base_features_df.copy()
-    df_bursty["downlink_mbps"] = tp_bursty
-    df_bursty["rsrp"]          = rsrp_bursty
-    df_bursty["rsrq"]          = rsrq_bursty
-    df_bursty["rssnr"]         = rssnr_bursty
-    scenarios["Bursty (20s good / 15s bad)"] = (tp_bursty, df_bursty)
+        seg_df = pd.read_csv(csv_path, index_col=0)
+        tp = seg_df["downlink_mbps"].values.astype(np.float64)
+        scenarios[seg_name] = (tp, seg_df)
+        print(f"  Loaded scenario '{seg_name}': {len(seg_df)} timesteps, avg throughput: {tp.mean():.3f} Mbps", flush=True)
 
     return scenarios
 
@@ -397,15 +357,8 @@ def main():
     model.eval()
     print("  Model loaded successfully.", flush=True)
 
-    # --- Load aligned data ---
-    print("Loading aligned data...", flush=True)
-    df = pd.read_csv(os.path.join(config.PROCESSED_DATA_DIR, "aligned_data.csv"), index_col=0)
-    base_throughput = df["downlink_mbps"].values.astype(np.float64)
-    print(f"  {len(df)} time steps, avg throughput: {base_throughput.mean():.3f} Mbps", flush=True)
-    print(f"  Video bitrate: {VIDEO_BITRATE_MBPS:.3f} Mbps (480p VP9)", flush=True)
-
-    # --- Create scenarios ---
-    scenarios = create_network_scenarios(base_throughput, df)
+    # --- Load segment scenarios (reads segments_ranges.txt) ---
+    scenarios = load_segment_scenarios()
 
     # --- QoE formula explanation ---
     print("\n" + "-" * 80, flush=True)
@@ -421,9 +374,9 @@ def main():
     print(f"  A proactive 5s pause costs {PAUSE_PENALTY*5 + PAUSE_EVENT_PENALTY:.1f} QoE points,", flush=True)
     print(f"  but preventing a 5s stall saves {REBUFFER_PENALTY*5 + STALL_EVENT_PENALTY:.1f} QoE points.", flush=True)
 
-    # --- Simulate each scenario ---
+    # --- Simulate each segment scenario ---
     print("\n" + "=" * 80, flush=True)
-    print("SIMULATION RESULTS", flush=True)
+    print("SIMULATION RESULTS (SEGMENT SCENARIOS)", flush=True)
     print("=" * 80, flush=True)
 
     initial_buffers = [5.0, 10.0, 15.0]  # test with different starting buffers
@@ -468,12 +421,12 @@ def main():
 
         all_results[scenario_name] = scenario_results
 
-    # --- Summary Table ---
-    print("\n\n" + "=" * 80, flush=True)
-    print("SUMMARY: QoE COMPARISON ACROSS ALL SCENARIOS (initial buffer = 10s)", flush=True)
-    print("=" * 80, flush=True)
-    print(f"  {'Scenario':<30} {'ABR QoE/min':>12} {'Ours QoE/min':>13} {'Improve':>10} {'Stalls Saved':>13} {'Rebuf Saved':>12}", flush=True)
-    print(f"  {'-'*90}", flush=True)
+    # --- Summary Table Across Segments ---
+    print("\n\n" + "=" * 95, flush=True)
+    print("SUMMARY: QoE COMPARISON ACROSS ALL SEGMENT SCENARIOS (initial buffer = 10s)", flush=True)
+    print("=" * 95, flush=True)
+    print(f"  {'Segment Scenario':<25} {'ABR QoE/min':>12} {'Ours QoE/min':>13} {'Improve':>10} {'Stalls Saved':>13} {'Rebuf Saved':>12}", flush=True)
+    print(f"  {'-'*95}", flush=True)
     for scenario_name, scenario_res in all_results.items():
         r = scenario_res[10.0]
         base_qoe = r["baseline"]["qoe_per_min"]
@@ -481,30 +434,30 @@ def main():
         improve = ours_qoe - base_qoe
         stalls_saved = r["baseline"]["num_stalls"] - r["ours"]["num_stalls"]
         rebuf_saved = r["baseline"]["rebuffer_time_s"] - r["ours"]["rebuffer_time_s"]
-        pct = (improve / abs(base_qoe) * 100) if base_qoe != 0 else 0
-        print(f"  {scenario_name:<30} {base_qoe:>12.2f} {ours_qoe:>13.2f} {improve:>+10.2f} {stalls_saved:>+13d} {rebuf_saved:>+12.1f}s", flush=True)
+        print(f"  {scenario_name:<25} {base_qoe:>12.2f} {ours_qoe:>13.2f} {improve:>+10.2f} {stalls_saved:>+13d} {rebuf_saved:>+12.1f}s", flush=True)
 
-    # --- Generate Comparison Plots ---
-    print("\nGenerating QoE comparison plots...", flush=True)
+    # --- Generate Comparison Plots Across Segments ---
+    print("\nGenerating QoE comparison plots across segments...", flush=True)
     os.makedirs(config.RESULTS_DIR, exist_ok=True)
 
-    # Plot 1: QoE bar chart across scenarios
+    # Plot 1: QoE bar chart across segment scenarios
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    fig.suptitle("QoE Comparison: YouTube ABR vs ABR + Pause Recommender", fontsize=14, fontweight="bold")
+    fig.suptitle("QoE Evaluation Across Segment Scenarios: YouTube ABR vs ABR + Pause Recommender", fontsize=14, fontweight="bold")
+
+    names = list(all_results.keys())
+    x = np.arange(len(names))
+    width = 0.35
 
     # 1a: QoE per minute
     ax = axes[0, 0]
-    names = list(all_results.keys())
     base_qoes = [all_results[n][10.0]["baseline"]["qoe_per_min"] for n in names]
     ours_qoes = [all_results[n][10.0]["ours"]["qoe_per_min"] for n in names]
-    x = np.arange(len(names))
-    width = 0.35
     ax.bar(x - width/2, base_qoes, width, label="ABR Only", color="#ff6b6b", alpha=0.8)
     ax.bar(x + width/2, ours_qoes, width, label="ABR + Ours", color="#51cf66", alpha=0.8)
     ax.set_ylabel("QoE Score (per minute)")
-    ax.set_title("QoE Score Comparison")
+    ax.set_title("QoE Score Comparison (Initial Buffer = 10s)")
     ax.set_xticks(x)
-    ax.set_xticklabels([n.split("(")[0].strip() for n in names], rotation=30, ha="right", fontsize=8)
+    ax.set_xticklabels(names, fontsize=10)
     ax.legend()
     ax.grid(axis="y", alpha=0.3)
     ax.axhline(y=0, color="black", linewidth=0.5)
@@ -516,9 +469,9 @@ def main():
     ax.bar(x - width/2, base_rebuf, width, label="ABR Only", color="#ff6b6b", alpha=0.8)
     ax.bar(x + width/2, ours_rebuf, width, label="ABR + Ours", color="#51cf66", alpha=0.8)
     ax.set_ylabel("Rebuffer Time (seconds)")
-    ax.set_title("Total Rebuffering Time")
+    ax.set_title("Total Rebuffering Time (s)")
     ax.set_xticks(x)
-    ax.set_xticklabels([n.split("(")[0].strip() for n in names], rotation=30, ha="right", fontsize=8)
+    ax.set_xticklabels(names, fontsize=10)
     ax.legend()
     ax.grid(axis="y", alpha=0.3)
 
@@ -533,7 +486,7 @@ def main():
     ax.set_ylabel("Count")
     ax.set_title("Stall & Pause Events")
     ax.set_xticks(x)
-    ax.set_xticklabels([n.split("(")[0].strip() for n in names], rotation=30, ha="right", fontsize=8)
+    ax.set_xticklabels(names, fontsize=10)
     ax.legend(fontsize=8)
     ax.grid(axis="y", alpha=0.3)
 
@@ -546,7 +499,7 @@ def main():
     ax.set_ylabel("Playback Continuity (%)")
     ax.set_title("Playback Smoothness")
     ax.set_xticks(x)
-    ax.set_xticklabels([n.split("(")[0].strip() for n in names], rotation=30, ha="right", fontsize=8)
+    ax.set_xticklabels(names, fontsize=10)
     ax.legend()
     ax.grid(axis="y", alpha=0.3)
     ax.set_ylim(0, 105)
@@ -555,44 +508,44 @@ def main():
     plt.savefig(os.path.join(config.RESULTS_DIR, "qoe_comparison.png"), dpi=150)
     plt.close()
 
-    # Plot 2: Buffer timeline for worst scenario
-    worst_scenario = "Cell-edge (10% throughput)"
-    if worst_scenario in all_results:
-        r = all_results[worst_scenario][10.0]
-        fig, axes = plt.subplots(2, 1, figsize=(16, 8), sharex=True)
-        fig.suptitle(f"Buffer Health Timeline: {worst_scenario}", fontsize=13, fontweight="bold")
+    # Plot 2: Buffer timeline for sample segment scenario
+    sample_seg = names[0] if names else "Segment_1"
+    default_buf = 10.0 if 10.0 in all_results[sample_seg] else initial_buffers[0]
+    r = all_results[sample_seg][default_buf]
+    fig, axes = plt.subplots(2, 1, figsize=(16, 8), sharex=True)
+    fig.suptitle(f"Buffer Health Timeline: {sample_seg} (Initial Buffer = {default_buf:.0f}s)", fontsize=13, fontweight="bold")
 
-        n_plot = min(600, len(r["baseline"]["buffer_history"]))  # first 10 minutes
+    n_plot = min(600, len(r["baseline"]["buffer_history"]))
 
-        ax = axes[0]
-        ax.plot(r["baseline"]["buffer_history"][:n_plot], color="#ff6b6b", linewidth=1, label="Buffer (ABR Only)")
-        ax.axhline(y=STALL_THRESHOLD, color="red", linestyle="--", alpha=0.5, label=f"Stall threshold ({STALL_THRESHOLD}s)")
-        for start, dur in r["baseline"]["stall_events"]:
-            if start < n_plot:
-                ax.axvspan(start, min(start + dur, n_plot), color="red", alpha=0.3)
-        ax.set_ylabel("Buffer (s)")
-        ax.set_title("Baseline: ABR Only")
-        ax.legend(loc="upper right")
-        ax.grid(alpha=0.3)
+    ax = axes[0]
+    ax.plot(r["baseline"]["buffer_history"][:n_plot], color="#ff6b6b", linewidth=1, label="Buffer (ABR Only)")
+    ax.axhline(y=STALL_THRESHOLD, color="red", linestyle="--", alpha=0.5, label=f"Stall threshold ({STALL_THRESHOLD}s)")
+    for start, dur in r["baseline"]["stall_events"]:
+        if start < n_plot:
+            ax.axvspan(start, min(start + dur, n_plot), color="red", alpha=0.3)
+    ax.set_ylabel("Buffer (s)")
+    ax.set_title(f"Baseline: ABR Only ({sample_seg})")
+    ax.legend(loc="upper right")
+    ax.grid(alpha=0.3)
 
-        ax = axes[1]
-        ax.plot(r["ours"]["buffer_history"][:n_plot], color="#51cf66", linewidth=1, label="Buffer (ABR + Ours)")
-        ax.axhline(y=STALL_THRESHOLD, color="red", linestyle="--", alpha=0.5, label=f"Stall threshold ({STALL_THRESHOLD}s)")
-        for start, dur in r["ours"]["stall_events"]:
-            if start < n_plot:
-                ax.axvspan(start, min(start + dur, n_plot), color="red", alpha=0.3)
-        for start, dur in r["ours"]["pause_events"]:
-            if start < n_plot:
-                ax.axvspan(start, min(start + dur, n_plot), color="blue", alpha=0.2)
-        ax.set_ylabel("Buffer (s)")
-        ax.set_xlabel("Time (seconds)")
-        ax.set_title("Ours: ABR + Pause Recommender (blue = proactive pause, red = stall)")
-        ax.legend(loc="upper right")
-        ax.grid(alpha=0.3)
+    ax = axes[1]
+    ax.plot(r["ours"]["buffer_history"][:n_plot], color="#51cf66", linewidth=1, label="Buffer (ABR + Ours)")
+    ax.axhline(y=STALL_THRESHOLD, color="red", linestyle="--", alpha=0.5, label=f"Stall threshold ({STALL_THRESHOLD}s)")
+    for start, dur in r["ours"]["stall_events"]:
+        if start < n_plot:
+            ax.axvspan(start, min(start + dur, n_plot), color="red", alpha=0.3)
+    for start, dur in r["ours"]["pause_events"]:
+        if start < n_plot:
+            ax.axvspan(start, min(start + dur, n_plot), color="blue", alpha=0.2)
+    ax.set_ylabel("Buffer (s)")
+    ax.set_xlabel("Time (steps / seconds)")
+    ax.set_title(f"Ours: ABR + Pause Recommender ({sample_seg}, blue = proactive pause, red = stall)")
+    ax.legend(loc="upper right")
+    ax.grid(alpha=0.3)
 
-        plt.tight_layout()
-        plt.savefig(os.path.join(config.RESULTS_DIR, "qoe_buffer_timeline.png"), dpi=150)
-        plt.close()
+    plt.tight_layout()
+    plt.savefig(os.path.join(config.RESULTS_DIR, "qoe_buffer_timeline.png"), dpi=150)
+    plt.close()
 
     # --- Feature Importance Summary ---
     print("\n" + "=" * 80, flush=True)
@@ -638,20 +591,16 @@ def main():
        AND throughput_to_bitrate_ratio < ~1.0
        AND (buffer_trend is negative OR rsrp is declining)
     THEN: recommend pause
-         duration ~ (30 - buffer_health) / avg_recent_throughput_ratio
+         duration ~ (SAFE_TARGET - buffer_health) / avg_recent_throughput_ratio
 """, flush=True)
 
-    # --- Training Summary ---
+    # --- Summary ---
     print("=" * 80, flush=True)
-    print("TRAINING SUMMARY", flush=True)
-    print("=" * 80, flush=True)
-    print(f"  Data:        7 recording sessions, 2,320 aligned timesteps", flush=True)
-    print(f"  Scenarios:   9 buffer simulation levels (3s to real)", flush=True)
-    print(f"  Sequences:   38,970 train / 9,744 validation", flush=True)
-    print(f"  Model:       2-layer LSTM, 126,594 parameters", flush=True)
-    print(f"  Training:    78 epochs, ~14.5s/epoch = ~18 minutes total on CPU", flush=True)
-    print(f"  Best epoch:  63 (val loss = 0.9615)", flush=True)
-    print(f"  Framework:   PyTorch 2.8", flush=True)
+    print("EVALUATION SUMMARY", flush=True)
+    total_steps = sum(len(s_df) for _, s_df in scenarios.values())
+    print(f"  Data:        Original 5G recording trace ({total_steps} aligned timesteps across {len(scenarios)} segments)", flush=True)
+    print(f"  Evaluation:  Real data only ({len(scenarios)} segment scenarios)", flush=True)
+    print(f"  Framework:   PyTorch", flush=True)
 
     qoe_comp_path = os.path.join(config.RESULTS_DIR, "qoe_comparison.png")
     qoe_time_path = os.path.join(config.RESULTS_DIR, "qoe_buffer_timeline.png")

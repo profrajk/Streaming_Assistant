@@ -401,6 +401,124 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ============================================================
+# Step 4b: Divide Input Data into Segments and Document Ranges
+# ============================================================
+def create_and_save_segments(df: pd.DataFrame, num_segments: int = config.DEFAULT_NUM_SEGMENTS) -> list:
+    """
+    Divide the input data containing all features into N segments.
+    Saves individual Segment_{i}.csv and Segment_{i}.json files in SEGMENTS_DIR,
+    and documents the exact ranges of the 6 essential features in segments_ranges.txt.
+    Preserves 100% of rows and all features without any data loss.
+    """
+    os.makedirs(config.SEGMENTS_DIR, exist_ok=True)
+    total_samples = len(df)
+    chunk_size = int(np.ceil(total_samples / num_segments))
+    segments = []
+
+    print(f"\n[Parser] Dividing input data into {num_segments} segments (directory: {config.SEGMENTS_DIR})...")
+
+    for i in range(num_segments):
+        start_idx = i * chunk_size
+        end_idx = min((i + 1) * chunk_size, total_samples)
+        seg_df = df.iloc[start_idx:end_idx].copy()
+        seg_name = f"Segment_{i+1}"
+
+        # Save to CSV and JSON in Segments directory
+        csv_path = os.path.join(config.SEGMENTS_DIR, f"{seg_name}.csv")
+        json_path = os.path.join(config.SEGMENTS_DIR, f"{seg_name}.json")
+        seg_df.to_csv(csv_path)
+        seg_df.to_json(json_path, orient="index", indent=2)
+
+        # Compute ranges for the 6 essential features
+        key_ranges = {}
+        for f in config.FORECAST_FEATURE_COLUMNS:
+            key_ranges[f] = {
+                "min": float(seg_df[f].min()),
+                "max": float(seg_df[f].max()),
+                "mean": float(seg_df[f].mean()),
+                "std": float(seg_df[f].std())
+            }
+
+        # Compute ranges for all other features
+        other_features = [c for c in seg_df.columns if c not in config.FORECAST_FEATURE_COLUMNS]
+        other_ranges = {}
+        for f in other_features:
+            if pd.api.types.is_numeric_dtype(seg_df[f]):
+                other_ranges[f] = {
+                    "min": float(seg_df[f].min()),
+                    "max": float(seg_df[f].max()),
+                    "mean": float(seg_df[f].mean())
+                }
+
+        segments.append({
+            "name": seg_name,
+            "segment_number": i + 1,
+            "sample_count": len(seg_df),
+            "start_index": start_idx,
+            "end_index": end_idx - 1,
+            "start_time": str(seg_df.index[0]),
+            "end_time": str(seg_df.index[-1]),
+            "key_ranges": key_ranges,
+            "other_ranges": other_ranges,
+            "csv_file": f"{seg_name}.csv",
+            "json_file": f"{seg_name}.json",
+        })
+
+    # Write documentation text file
+    txt_path = config.SEGMENTS_TXT_PATH
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write("=" * 80 + "\n")
+        f.write("INPUT DATA 5-SEGMENT PARTITION AND FEATURE RANGES SUMMARY\n")
+        f.write("=" * 80 + "\n\n")
+        f.write(f"Number of segments: {num_segments}\n")
+        f.write(f"Total input samples: {total_samples} rows ({config.RESAMPLE_INTERVAL} grid)\n")
+        f.write(f"Total features preserved: {len(df.columns)} columns (0 data lost)\n")
+        f.write(f"Segments directory: {config.SEGMENTS_DIR}\n\n")
+
+        f.write("-" * 80 + "\n")
+        f.write("ESSENTIAL 6 FEATURES: RANGES BY SEGMENT\n")
+        f.write("-" * 80 + "\n\n")
+
+        for seg in segments:
+            f.write(f"{seg['name']}:\n")
+            f.write(f"  Samples: {seg['sample_count']} rows ({seg['start_time']} -> {seg['end_time']})\n")
+            f.write(f"  Files: {seg['csv_file']}, {seg['json_file']}\n")
+            f.write("  Feature Ranges:\n")
+            for feat_name, stats in seg["key_ranges"].items():
+                f.write(f'    "{feat_name}" : {stats["min"]:.3f} - {stats["max"]:.3f}  (mean: {stats["mean"]:.3f})\n')
+            f.write("\n")
+
+        f.write("=" * 80 + "\n")
+        f.write("SIDE-BY-SIDE COMPARISON TABLE: 6 ESSENTIAL FEATURES ACROSS SEGMENTS\n")
+        f.write("=" * 80 + "\n")
+        header = f"{'Feature':<30} | " + " | ".join([f"{s['name']:<18}" for s in segments]) + "\n"
+        f.write(header)
+        f.write("-" * (32 + 21 * num_segments) + "\n")
+
+        for feat in config.FORECAST_FEATURE_COLUMNS:
+            line = f"{feat:<30} | "
+            for seg in segments:
+                r = seg["key_ranges"][feat]
+                val_str = f"{r['min']:.1f} to {r['max']:.1f}"
+                line += f"{val_str:<18} | "
+            f.write(line[:-2] + "\n")
+
+        f.write("\n" + "=" * 80 + "\n")
+        f.write("ALL REMAINING FEATURES SUMMARY (PRESERVED IN ALL SEGMENT FILES)\n")
+        f.write("=" * 80 + "\n")
+        for feat in segments[0]["other_ranges"].keys():
+            line = f"{feat:<28} | "
+            for seg in segments:
+                r = seg["other_ranges"].get(feat, {"min": 0, "max": 0})
+                val_str = f"{r['min']:.1f} to {r['max']:.1f}"
+                line += f"{val_str:<18} | "
+            f.write(line[:-2] + "\n")
+
+    print(f"  Saved {num_segments} segment files and ranges report: {txt_path}")
+    return segments
+
+
+# ============================================================
 # Step 5: Labeling from Real Buffer Data
 # ============================================================
 def generate_labels(df: pd.DataFrame) -> pd.DataFrame:
@@ -664,6 +782,9 @@ def main():
     aligned_csv_path = os.path.join(config.PROCESSED_DATA_DIR, "aligned_data.csv")
     featured_df.to_csv(aligned_csv_path, index=True)
     print(f"\n[Parser] Saved aligned data to: {aligned_csv_path}")
+
+    # Step 4b: Divide into segments and document 6 essential feature ranges
+    create_and_save_segments(featured_df)
 
     # Step 5: Generate labels via buffer simulation (real buffer data only)
     labeled_df = generate_labels(featured_df)

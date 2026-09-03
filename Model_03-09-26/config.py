@@ -15,6 +15,11 @@ PROCESSED_DATA_DIR = os.path.join(BASE_DIR, "processed_data")
 CHECKPOINT_DIR = os.path.join(BASE_DIR, "checkpoints")
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
 
+SEGMENTS_DIR = os.path.join(BASE_DIR, "Input Data", "Segments")
+SEGMENTS_TXT_PATH = os.path.join(SEGMENTS_DIR, "segments_ranges.txt")
+
+DEFAULT_NUM_SEGMENTS = 5
+
 # ============================================================
 # Data Parsing
 # ============================================================
@@ -148,7 +153,7 @@ MAX_PAUSE_DURATION_S = 20.0       # Prevents overly-long single pauses
 PAUSE_COOLDOWN_S = 15             # No back-to-back pauses within 15s
 
 # Only recommend a pause when the buffer has actually dropped to this level.
-MIN_BUFFER_TO_PAUSE_S = 15.0      # Don't pause when buffer is comfortable
+MIN_BUFFER_TO_PAUSE_S = 20.0      # Don't pause when buffer is comfortable (matches CRITICAL_BUFFER_S)
 
 # ============================================================
 # Evaluation

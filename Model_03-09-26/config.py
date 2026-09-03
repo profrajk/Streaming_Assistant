@@ -26,8 +26,8 @@ APP_SKIP_KEYS = {
 }
 
 # Resample interval for time alignment (1-second grid)
-RESAMPLE_INTERVAL = "1s"
-STEP_DURATION_S = 1       # 1 sample per second
+RESAMPLE_INTERVAL = "5s"
+STEP_DURATION_S = 5       # 1 sample per second
 
 # Network type encoding
 NETWORK_TYPE_MAP = {
@@ -78,16 +78,13 @@ FEATURE_COLUMNS = [
 NUM_FEATURES = len(FEATURE_COLUMNS)
 
 # ============================================================
-# Labeling (Real Buffer from Ground Truth — on 1s grid)
+# Labeling (Real Buffer from Ground Truth — on 5s grid)
 # ============================================================
 # Buffer thresholds
-CRITICAL_BUFFER_S = 2.0       # Buffer below this = stall imminent → should_pause=1
-SAFE_BUFFER_TARGET_S = 20.0   # Conservative target buffer when pausing
+CRITICAL_BUFFER_S = 20.0       # Buffer below this = stall imminent → should_pause=1
+SAFE_BUFFER_TARGET_S = 80.0   # Conservative target buffer when pausing
 LOOKAHEAD_S = 30              # Look-ahead window in seconds
 LOOKAHEAD_STEPS = LOOKAHEAD_S // STEP_DURATION_S
-
-# Synthetic buffer levels for training when S_buffer flag is enabled
-SYNTHETIC_BUFFER_LEVELS = [3.0, 5.0, 8.0, 10.0, 15.0, 20.0, 30.0]
 
 # ============================================================
 # Model Architecture

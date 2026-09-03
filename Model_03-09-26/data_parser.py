@@ -8,7 +8,6 @@ Usage:
     python data_parser.py
 """
 import os
-import sys
 import json
 import re
 import numpy as np
@@ -402,34 +401,30 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ============================================================
-# Step 5: Labeling from Real Buffer Data  (Change ii)
+# Step 5: Labeling from Real Buffer Data
 # ============================================================
-def generate_labels(df: pd.DataFrame, use_synthetic_buffers: bool = False) -> pd.DataFrame:
+def generate_labels(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Generate training labels via forward buffer simulation.
+    Generate training labels via forward buffer simulation on REAL measured buffer data.
 
-    - If use_synthetic_buffers is False (default): Simulates forward from the REAL measured buffer_health_s.
-    - If use_synthetic_buffers is True (S_buffer-Y): Augments the dataset by simulating multiple
-      starting buffer levels [3s, 5s, 8s, 10s, 15s, 20s, 30s, real] across all timesteps.
+    For each timestep t, simulate buffer evolution 30 seconds ahead using the
+    actual recorded throughput and bitrate. If the buffer would drop to or below
+    CRITICAL_BUFFER_S within the lookahead window, mark should_pause=1 and
+    compute the recommended pause duration to reach SAFE_BUFFER_TARGET_S.
     """
-    if use_synthetic_buffers:
-        print("\n[Parser] Generating labels using SYNTHETIC BUFFER SCENARIOS (S_buffer-Y enabled)...")
-        buffer_levels = config.SYNTHETIC_BUFFER_LEVELS + ["real"]
-    else:
-        print("\n[Parser] Generating labels from REAL buffer data only (no synthetic buffers)...")
-        buffer_levels = ["real"]
+    print("\n[Parser] Generating labels from REAL buffer data...")
 
-    throughput  = df["downlink_mbps"].values          # Mbps
-    real_buffer = df["buffer_health_s"].values         # seconds (measured)
+    throughput      = df["downlink_mbps"].values          # Mbps
+    real_buffer     = df["buffer_health_s"].values         # seconds (measured)
 
-    # Per-timestep video bitrate: use recorded value or fallback
+    # Per-timestep video bitrate: use recorded value or fallback constant
     if "video_bitrate_kbps" in df.columns:
         video_bitrate_arr = df["video_bitrate_kbps"].fillna(
-            config.DEFAULT_VIDEO_BITRATE_KBPS).values / 1000.0  # -> Mbps
+            config.DEFAULT_VIDEO_BITRATE_KBPS).values / 1000.0   # → Mbps
     else:
         video_bitrate_arr = np.full(len(df), config.DEFAULT_VIDEO_BITRATE_MBPS)
 
-    video_bitrate_arr = np.clip(video_bitrate_arr, 0.001, None)  # avoid div-by-zero
+    video_bitrate_arr = np.clip(video_bitrate_arr, 0.001, None)   # avoid div-by-zero
 
     lookahead_steps = config.LOOKAHEAD_STEPS
     critical        = config.CRITICAL_BUFFER_S
@@ -437,61 +432,46 @@ def generate_labels(df: pd.DataFrame, use_synthetic_buffers: bool = False) -> pd
     step_sec        = config.STEP_DURATION_S
     n_steps         = len(df)
 
-    all_dfs = []
+    should_pause   = np.zeros(n_steps, dtype=np.float32)
+    pause_duration = np.zeros(n_steps, dtype=np.float32)
 
-    for buf_level in buffer_levels:
-        df_copy = df.copy()
-        if buf_level != "real":
-            df_copy["buffer_health_s"] = float(buf_level)
-            # Recompute buffer trend with synthetic level
-            df_copy["buffer_trend_10s"] = 0.0
-            start_buf_arr = np.full(n_steps, float(buf_level))
-        else:
-            start_buf_arr = real_buffer
+    for t in range(n_steps):
+        buffer      = float(real_buffer[t])
+        would_stall = False
 
-        should_pause   = np.zeros(n_steps, dtype=np.float32)
-        pause_duration = np.zeros(n_steps, dtype=np.float32)
+        end_t = min(t + lookahead_steps, n_steps)
+        for future_t in range(t, end_t):
+            tp      = throughput[future_t]
+            vbr     = video_bitrate_arr[future_t]
+            net_rate = ((tp / vbr) - 1.0) * step_sec
+            buffer  += net_rate
+            buffer   = max(buffer, 0.0)
 
-        for t in range(n_steps):
-            buffer       = float(start_buf_arr[t])
-            would_stall  = False
+            if buffer <= critical:
+                would_stall = True
+                break
 
-            end_t = min(t + lookahead_steps, n_steps)
-            for future_t in range(t, end_t):
-                tp      = throughput[future_t]
-                vbr     = video_bitrate_arr[future_t]
-                net_rate = ((tp / vbr) - 1.0) * step_sec
-                buffer  += net_rate
-                buffer   = max(buffer, 0.0)
+        if would_stall:
+            should_pause[t] = 1.0
+            recent_start = max(0, t - 3)
+            avg_tp  = np.mean(throughput[recent_start:t + 1])
+            avg_vbr = np.mean(video_bitrate_arr[recent_start:t + 1])
+            if avg_tp > 0:
+                fill_rate = avg_tp / avg_vbr
+                needed    = max(0.0, safe_target - real_buffer[t])
+                dur       = needed / max(fill_rate, 0.01)
+            else:
+                dur = 10.0
+            pause_duration[t] = float(np.clip(dur, 1.0, config.MAX_PAUSE_DURATION_S))
 
-                if buffer <= critical:
-                    would_stall = True
-                    break
+    df = df.copy()
+    df["should_pause"]     = should_pause
+    df["pause_duration_s"] = pause_duration
 
-            if would_stall:
-                should_pause[t] = 1.0
-                recent_start = max(0, t - 3)
-                avg_tp = np.mean(throughput[recent_start:t + 1])
-                avg_vbr = np.mean(video_bitrate_arr[recent_start:t + 1])
-                if avg_tp > 0:
-                    fill_rate = avg_tp / avg_vbr
-                    needed    = max(0.0, safe_target - start_buf_arr[t])
-                    dur = needed / max(fill_rate, 0.01)
-                else:
-                    dur = 10.0
-
-                pause_duration[t] = float(np.clip(dur, 1.0, config.MAX_PAUSE_DURATION_S))
-
-        df_copy["should_pause"]     = should_pause
-        df_copy["pause_duration_s"] = pause_duration
-        all_dfs.append(df_copy)
-
-    labeled_df = pd.concat(all_dfs, ignore_index=True)
-    n_pos = int(labeled_df["should_pause"].sum())
-    total_rows = len(labeled_df)
-    print(f"  Labels done: {n_pos}/{total_rows} positive ({100*n_pos/total_rows:.1f}%) across {len(buffer_levels)} scenario(s)")
-
-    return labeled_df
+    n_pos  = int(should_pause.sum())
+    total  = n_steps
+    print(f"  Labels done: {n_pos}/{total} positive ({100*n_pos/total:.1f}%) — real buffer only")
+    return df
 
 
 # ============================================================
@@ -685,9 +665,8 @@ def main():
     featured_df.to_csv(aligned_csv_path, index=True)
     print(f"\n[Parser] Saved aligned data to: {aligned_csv_path}")
 
-    # Step 5: Generate labels via buffer simulation (with S_buffer-Y support)
-    use_synthetic = any("S_buffer-Y" in arg or "--synthetic" in arg or "s_buffer=y" in arg.lower() for arg in sys.argv)
-    labeled_df = generate_labels(featured_df, use_synthetic_buffers=use_synthetic)
+    # Step 5: Generate labels via buffer simulation (real buffer data only)
+    labeled_df = generate_labels(featured_df)
 
     # Step 6: Create Predictive LSTM sequences (past 30s -> future horizon)
     X, Y_future, y_cls, y_reg = create_sequences(labeled_df)

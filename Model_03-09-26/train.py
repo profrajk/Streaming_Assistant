@@ -6,7 +6,6 @@ Trains the two-stage model:
   2. Pause Recommender (predicts proactive pause decision & duration)
 """
 import os
-import sys
 import time
 import json
 import random
@@ -121,10 +120,9 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}", flush=True)
 
-    # Check for S_buffer-Y flag in CLI arguments
-    use_synthetic = any("S_buffer-Y" in arg or "--synthetic" in arg or "s_buffer=y" in arg.lower() for arg in sys.argv)
-    if use_synthetic or not os.path.exists(os.path.join(config.PROCESSED_DATA_DIR, "X_train.npy")):
-        print(f"Running data parser (synthetic_buffers={use_synthetic})...", flush=True)
+    # Auto-run data parser if processed data does not exist yet
+    if not os.path.exists(os.path.join(config.PROCESSED_DATA_DIR, "X_train.npy")):
+        print("Processed data not found — running data parser...", flush=True)
         import data_parser
         data_parser.main()
 
